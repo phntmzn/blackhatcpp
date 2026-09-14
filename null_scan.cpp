@@ -1,5 +1,5 @@
-// Compile: g++ -o fin_scan fin_scan.cpp
-// Run: sudo ./fin_scan <target_ip> <port>
+// Compile: g++ -o null_scan null_scan.cpp
+// Run: sudo ./null_scan <target_ip> <port>
 // Requires: root privileges
 
 #include <iostream>
@@ -10,13 +10,11 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <poll.h>
 
-class FINScanner {
+class NullScanner {
 private:
     int sock;
-    std::string targetIP;
     
     unsigned short checksum(void* data, int len) {
         unsigned short* buf = (unsigned short*)data;
@@ -29,16 +27,16 @@ private:
     }
     
 public:
-    FINScanner(const std::string& ip) : targetIP(ip) {
+    NullScanner() {
         sock = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
         if (sock < 0) { perror("socket"); exit(1); }
     }
     
-    bool scan(int port) {
+    bool scan(const char* targetIP, int targetPort) {
         struct sockaddr_in target;
         target.sin_family = AF_INET;
-        target.sin_port = htons(port);
-        target.sin_addr.s_addr = inet_addr(targetIP.c_str());
+        target.sin_port = htons(targetPort);
+        target.sin_addr.s_addr = inet_addr(targetIP);
         
         char packet[4096];
         struct iphdr* ip = (struct iphdr*)packet;
@@ -59,7 +57,7 @@ public:
         tcp->dest = target.sin_port;
         tcp->seq = rand();
         tcp->doff = 5;
-        tcp->fin = 1;
+        // No flags set (NULL scan)
         tcp->window = htons(0);
         
         sendto(sock, packet, ip->tot_len, 0, 
@@ -85,7 +83,7 @@ public:
         return true;  // Port open or filtered
     }
     
-    ~FINScanner() { close(sock); }
+    ~NullScanner() { close(sock); }
 };
 
 int main(int argc, char* argv[]) {
@@ -93,11 +91,11 @@ int main(int argc, char* argv[]) {
         std::cerr << "Usage: " << argv[0] << " <target_ip> <port>\n";
         return 1;
     }
-    FINScanner scanner(argv[1]);
-    if (scanner.scan(atoi(argv[2]))) {
-        std::cout << "Port " << argv[2] << " is open or filtered\n";
+    NullScanner scanner;
+    if (scanner.scan(argv[1], atoi(argv[2]))) {
+        std::cout << "Port open or filtered\n";
     } else {
-        std::cout << "Port " << argv[2] << " is closed\n";
+        std::cout << "Port closed\n";
     }
     return 0;
 }

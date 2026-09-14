@@ -1,39 +1,87 @@
-// ============================================================
-// arp_monitor.cpp — detect duplicate ARP replies (spoof signal)
-// ------------------------------------------------------------
-// Compile: clang++ -std=c++17 -O2 -o arp_monitor arp_monitor.cpp \
-//          -I/opt/homebrew/include -L/opt/homebrew/lib \
-//          -lPcap++ -lPacket++ -lCommon++ -lpcap
-// Usage:   sudo ./arp_monitor <iface>
-// ============================================================
-#include "PcapLiveDeviceList.h"
-#include "ArpLayer.h"
-#include "Packet.h"
-#include <unordered_map>
+// Compile: g++ -o arp_monitor arp_monitor.cpp
+// Run: sudo ./arp_monitor <interface>
+// Requires: root privileges, libpcap optional
+
+#include <iostream>
+#include <cstring>
+#include <cstdlib>
+#include <map>
 #include <string>
-#include <cstdio>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <netinet/if_ether.h>
+#include <linux/if_packet.h>
+#include <unistd.h>
 
-int main(int argc, char** argv) {
-    if (argc < 2) return 1;
-    auto* dev = pcpp::PcapLiveDeviceList::getInstance().getPcapLiveDeviceByName(argv[1]);
-    if (!dev || !dev->open()) return 1;
+class ARPMonitor {
+private:
+    int sock;
+    std::string interface;
+    std::map<std::string, std::string> arpTable;
+    
+public:
+    ARPMonitor(const std::string& iface) : interface(iface) {
+        sock = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ARP));
+        if (sock < 0) { perror("socket"); exit(1); }
+        
+        struct sockaddr_ll sll;
+        memset(&sll, 0, sizeof(sll));
+        sll.sll_family = AF_PACKET;
+        sll.sll_ifindex = if_nametoindex(interface.c_str());
+        sll.sll_protocol = htons(ETH_P_ARP);
+        
+        if (bind(sock, (struct sockaddr*)&sll, sizeof(sll)) < 0) {
+            perror("bind");
+            exit(1);
+        }
+    }
+    
+    void monitor() {
+        char buffer[65536];
+        
+        while (true) {
+            int bytes = recv(sock, buffer, sizeof(buffer), 0);
+            if (bytes < 42) continue;
+            
+            struct ether_arp* arp = (struct ether_arp*)(buffer + 14);
+            
+            if (ntohs(arp->arp_op) == ARPOP_REPLY) {
+                char ip[INET_ADDRSTRLEN];
+                char mac[18];
+                
+                inet_ntop(AF_INET, arp->arp_spa, ip, sizeof(ip));
+                snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+                         arp->arp_sha[0], arp->arp_sha[1], arp->arp_sha[2],
+                         arp->arp_sha[3], arp->arp_sha[4], arp->arp_sha[5]);
+                
+                std::string ipStr(ip);
+                std::string macStr(mac);
+                
+                if (arpTable.find(ipStr) != arpTable.end()) {
+                    if (arpTable[ipStr] != macStr) {
+                        std::cout << "[!] Possible ARP poisoning detected!\n";
+                        std::cout << "    IP: " << ipStr << "\n";
+                        std::cout << "    Old MAC: " << arpTable[ipStr] << "\n";
+                        std::cout << "    New MAC: " << macStr << "\n";
+                    }
+                }
+                
+                arpTable[ipStr] = macStr;
+            }
+        }
+    }
+    
+    ~ARPMonitor() { close(sock); }
+};
 
-    std::unordered_map<std::string, std::string> seen;
-    dev->startCapture([](pcpp::RawPacket* raw, pcpp::PcapLiveDevice*, void* cookie) {
-        auto* seen = static_cast<std::unordered_map<std::string, std::string>*>(cookie);
-        pcpp::Packet pkt(raw);
-        auto* arp = pkt.getLayerOfType<pcpp::ArpLayer>();
-        if (!arp) return;
-        std::string ip = arp->getSenderIpAddr().toString();
-        std::string mac = arp->getSenderMacAddress().toString();
-        auto it = seen->find(ip);
-        if (it != seen->end() && it->second != mac)
-            std::printf("[!] ARP spoof: %s now at %s (was %s)\n",
-                        ip.c_str(), mac.c_str(), it->second.c_str());
-        (*seen)[ip] = mac;
-    }, &seen);
-
-    std::printf("[*] monitoring %s...\n", argv[1]);
-    while (true) sleep(1);
+int main(int argc, char* argv[]) {
+    if (argc != 2) {
+        std::cerr << "Usage: " << argv[0] << " <interface>\n";
+        return 1;
+    }
+    ARPMonitor monitor(argv[1]);
+    monitor.monitor();
     return 0;
 }

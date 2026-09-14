@@ -1,5 +1,5 @@
-// Compile: g++ -o fin_scan fin_scan.cpp
-// Run: sudo ./fin_scan <target_ip> <port>
+// Compile: g++ -o fingerprint fingerprint.cpp
+// Run: sudo ./fingerprint <target_ip> <port>
 // Requires: root privileges
 
 #include <iostream>
@@ -10,13 +10,11 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <poll.h>
 
-class FINScanner {
+class TCPFingerprinter {
 private:
     int sock;
-    std::string targetIP;
     
     unsigned short checksum(void* data, int len) {
         unsigned short* buf = (unsigned short*)data;
@@ -29,26 +27,36 @@ private:
     }
     
 public:
-    FINScanner(const std::string& ip) : targetIP(ip) {
+    TCPFingerprinter() {
         sock = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
         if (sock < 0) { perror("socket"); exit(1); }
     }
     
-    bool scan(int port) {
+    void fingerprint(const char* targetIP, int targetPort) {
         struct sockaddr_in target;
         target.sin_family = AF_INET;
-        target.sin_port = htons(port);
-        target.sin_addr.s_addr = inet_addr(targetIP.c_str());
+        target.sin_port = htons(targetPort);
+        target.sin_addr.s_addr = inet_addr(targetIP);
         
         char packet[4096];
         struct iphdr* ip = (struct iphdr*)packet;
         struct tcphdr* tcp = (struct tcphdr*)(packet + sizeof(struct iphdr));
+        char* options = packet + sizeof(struct iphdr) + sizeof(struct tcphdr);
         
         memset(packet, 0, 4096);
         
+        // SYN with MSS and Window Scale
+        options[0] = 0x02; options[1] = 0x04;
+        *(uint16_t*)(options + 2) = htons(1460);
+        options[4] = 0x01;
+        options[5] = 0x03; options[6] = 0x03;
+        options[7] = 0x07;
+        
+        int optLen = 8;
+        
         ip->ihl = 5;
         ip->version = 4;
-        ip->tot_len = sizeof(struct iphdr) + sizeof(struct tcphdr);
+        ip->tot_len = sizeof(struct iphdr) + sizeof(struct tcphdr) + optLen;
         ip->ttl = 64;
         ip->protocol = IPPROTO_TCP;
         ip->saddr = inet_addr("192.168.1.100");
@@ -58,9 +66,9 @@ public:
         tcp->source = htons(rand() % 65535);
         tcp->dest = target.sin_port;
         tcp->seq = rand();
-        tcp->doff = 5;
-        tcp->fin = 1;
-        tcp->window = htons(0);
+        tcp->doff = 5 + (optLen / 4);
+        tcp->syn = 1;
+        tcp->window = htons(65535);
         
         sendto(sock, packet, ip->tot_len, 0, 
                (struct sockaddr*)&target, sizeof(target));
@@ -80,12 +88,13 @@ public:
             struct iphdr* rip = (struct iphdr*)response;
             struct tcphdr* rtcp = (struct tcphdr*)(response + (rip->ihl * 4));
             
-            if (rtcp->rst) return false;  // Port closed
+            std::cout << "TTL: " << (int)rip->ttl << std::endl;
+            std::cout << "Window: " << ntohs(rtcp->window) << std::endl;
+            std::cout << "Flags: 0x" << std::hex << (int)rtcp->th_flags << std::endl;
         }
-        return true;  // Port open or filtered
     }
     
-    ~FINScanner() { close(sock); }
+    ~TCPFingerprinter() { close(sock); }
 };
 
 int main(int argc, char* argv[]) {
@@ -93,11 +102,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Usage: " << argv[0] << " <target_ip> <port>\n";
         return 1;
     }
-    FINScanner scanner(argv[1]);
-    if (scanner.scan(atoi(argv[2]))) {
-        std::cout << "Port " << argv[2] << " is open or filtered\n";
-    } else {
-        std::cout << "Port " << argv[2] << " is closed\n";
-    }
+    TCPFingerprinter fp;
+    fp.fingerprint(argv[1], atoi(argv[2]));
     return 0;
 }

